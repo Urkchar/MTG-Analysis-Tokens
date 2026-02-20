@@ -9,6 +9,8 @@ from bs4 import BeautifulSoup
 import json
 from pathlib import Path
 import xml.etree.ElementTree as ET
+# from pprint import pprint
+from tqdm import tqdm
 
 
 class TokenBucket:
@@ -84,7 +86,7 @@ def _is_retryable_request_error(e: Exception) -> bool:
     """
     if isinstance(e, requests.HTTPError) and e.response is not None:
         status = e.response.status_code
-        if status in {403,408, 425, 429, 500, 502, 503, 504}:
+        if status in {403, 408, 425, 429, 500, 502, 503, 504}:
             return True
         return False  # Non-retryable HTTP error
 
@@ -146,15 +148,15 @@ class EDHRec:
             *,
             timeout: float = 10.0,   # per-request timeout (seconds)
             max_retries: int = 5,   # number of retries on transient failures
-            base_delay: float = 0.5,   # base backoff (seconds)
-            max_delay: float = 8.0,   # max backoff (seconds)
+            base_delay: float = 30.0,   # base backoff (seconds)
+            max_delay: float = 600.0,   # max backoff (seconds)
             jitter: str = "full",   # "full" | "equal" | "decorrelated" | "none"
             token_cost: float = 1.0,   # tokens consumed per attempt
             **request_kwargs   # pass extra requests.get kwargs if needed
-        ) -> requests.Response:
+        ) -> Optional[requests.Response]:
         """
         Resilient GET with client-side rate limiting, retries, and jittered backoff.
-        Honors Retry-After when present. No overall (total) deadline—only per-request timeout.
+        Honors Retry-After when present.
         """
 
         attempt = 0
@@ -165,6 +167,9 @@ class EDHRec:
 
             try:
                 resp = self.session.get(url, timeout=timeout, **request_kwargs)
+                if resp.status_code == 404:
+                    print(f"\nWarning: 404 Not Found for {url}")
+                    return None
                 resp.raise_for_status()
                 return resp
 
@@ -218,6 +223,9 @@ class EDHRec:
             raise RuntimeError("Could not extract buildId from __NEXT_DATA__")
 
         return build_id
+
+    def set_build_id(self):
+        self.build_id = self.get_build_id()
     
 
     def build_next_js_url(self, route: str, identifier: str) -> str:
@@ -236,6 +244,8 @@ class EDHRec:
     def get_deck(self, url_hash: str):
         url = self.build_next_js_url("deckpreview", url_hash)
         resp = self._get(url)
+        if not resp:
+            return None
         data = resp.json()["pageProps"]["data"]["panels"]["deckinfo"]["deck_preview"]
         keep = {
             "cedh",
@@ -254,15 +264,23 @@ class EDHRec:
 
 def save_decks(commander: str, client: EDHRec):
     decks = client.get_decks(commander)
-    print(f"Found {len(decks)} decks for commander {commander}")
+    print(f"Found {len(decks)} decks for {commander}")
 
     Path(f"decks/{commander}").mkdir(parents=True, exist_ok=True)
 
-    for deck in decks:
+    for deck in tqdm(decks):
         url_hash = deck["urlhash"]
+        if Path(f"decks/{commander}/{url_hash}.json").is_file():
+            continue  # Skip if we already have this deck
         deck_data = client.get_deck(url_hash)
-        with open(f"decks/{commander}/{url_hash}.json", "w") as f:
-            json.dump(deck_data, f)
+        if deck_data is not None:
+            with open(f"decks/{commander}/{url_hash}.json", "w") as f:
+                json.dump(deck_data, f)
+
+
+def count_decks(commander: str, client: EDHRec) -> int:
+    decks = client.get_decks(commander)
+    return len(decks)   # All decks for all commanders: 9,283,036
 
 
 def main():
@@ -293,14 +311,11 @@ def main():
             commander = url.split("/decks/", 1)[1].strip("/")
             commanders.append(commander)
 
-    # for commander in commanders[:10]:
-    #     print(commander)
+    client = EDHRec(rate_per_sec=3)
+    print(f"build_id: {client.build_id}")   # kZWgTuW-iC6XkpNPLm0y9, 2/18/2026 10:09 PM
 
-    # print(len(commanders))
-
-    client = EDHRec(rate_per_sec=2)
-
-    for commander in commanders[2:10]:  # Limit to first 10 for testing
+    for commander in commanders:
+        client.set_build_id()
         save_decks(commander, client)
 
 
