@@ -9,7 +9,6 @@ from bs4 import BeautifulSoup
 import json
 from pathlib import Path
 import xml.etree.ElementTree as ET
-# from pprint import pprint
 from tqdm import tqdm
 
 
