@@ -140,7 +140,6 @@ class EDHRec:
         self.base_next_js_url = f"{self.base_url}/_next/data/"
         self.build_id = self.get_build_id()
 
-
     def _get(
             self,
             url: str,
@@ -168,6 +167,7 @@ class EDHRec:
                 resp = self.session.get(url, timeout=timeout, **request_kwargs)
                 if resp.status_code == 404:
                     print(f"\nWarning: 404 Not Found for {url}")
+                    self.set_build_id()  # Refresh build_id in case of stale cache causing 404s
                     return None
                 resp.raise_for_status()
                 return resp
@@ -200,7 +200,6 @@ class EDHRec:
 
                 time.sleep(sleep_for)
 
-
     def get_build_id(self) -> str:
         """Fetch HTML and parse __NEXT_DATA__ to get buildId."""
         html = self._get(self.base_url).text
@@ -226,20 +225,17 @@ class EDHRec:
     def set_build_id(self):
         self.build_id = self.get_build_id()
     
-
     def build_next_js_url(self, route: str, identifier: str) -> str:
         """identifier is a formatted commander name or a URL hash"""
         url = f"{self.base_next_js_url}/{self.build_id}/{route}/{identifier}.json"
         return url
     
-
     def get_decks(self, commander: str):
         url = self.build_next_js_url("decks", commander)
         resp = self._get(url)
         data = resp.json()["pageProps"]["data"]["table"]
         return data
     
-
     def get_deck(self, url_hash: str):
         url = self.build_next_js_url("deckpreview", url_hash)
         resp = self._get(url)
@@ -279,7 +275,26 @@ def save_decks(commander: str, client: EDHRec):
 
 def count_decks(commander: str, client: EDHRec) -> int:
     decks = client.get_decks(commander)
-    return len(decks)   # All decks for all commanders: 9,283,036
+    return len(decks)   # All decks for all commanders: 9,283,036. Not including flavor names: 8,314,401
+
+
+def format_commander_name(name: str) -> str:
+    # EDHRec formats commander names in URLs by lowercasing and replacing non-alphanumerics with hyphens
+    f = name.lower()
+    f = re.sub(r"[^a-z0-9]+", "-", f)
+    f = re.sub(r"-+", "-", f)
+    f = f.strip("-")
+    return f
+
+
+def is_unique_commander(commander: str, formatted_flavor_names: list) -> bool:
+    formatted_commander = format_commander_name(commander)
+    # print(formatted_flavor_names)
+
+    for formatted_flavor_name in formatted_flavor_names:
+        if formatted_flavor_name in formatted_commander:
+            return False
+    return True
 
 
 def main():
@@ -292,10 +307,8 @@ def main():
 
     # Parse XML
     root = ET.fromstring(resp.text)
-    # print(root)
 
     commanders = []
-
     # Find all <url> elements within the sitemap namespace
     for url_tag in root.findall("sm:url", NS):
         # print(f"Processing {url_tag} in sitemap...")
@@ -313,9 +326,39 @@ def main():
     client = EDHRec(rate_per_sec=3)
     print(f"build_id: {client.build_id}")   # kZWgTuW-iC6XkpNPLm0y9, 2/18/2026 10:09 PM
 
+    # Some commanders have a flavor name, but are the same card ("Mina Harker" == "Thalia, Guardian of Thraben")
+    scryfall_query = "https://api.scryfall.com/cards/search?as=grid&q=has%3Aflavor_name+prints%3E1+%2B%2B+is%3Acommander&unique=cards"
+    resp = requests.get(scryfall_query)
+    resp.raise_for_status()
+
+    # print(resp.json())
+    cards = resp.json().get("data")
+    fields = set()
+    for card in cards:
+        fields.update(card.keys())
+    # pprint(sorted(fields))
+    # names = [card["name"] for card in cards]
+    flavor_names = [card["flavor_name"] if "flavor_name" in card else card["card_faces"][0]["flavor_name"] for card in cards]
+
+    # Names in EDHRec are formatted ("Thalia, Guardian of Thraben" → "thalia-guardian-of-thraben")
+    formatted_flavor_names = [format_commander_name(fn) for fn in flavor_names]
+
+    # deck_count = 0
+    # for commander in commanders:
+    #     if not is_unique_commander(commander, formatted_flavor_names):
+    #         print(f"Skipping {commander} due to non-unique commander name.")
+    #         continue
+    #     count = count_decks(commander, client)
+    #     print(f"{commander}: {count} deck(s)")
+    #     deck_count += count
+    # print(f"Total decks across all commanders: {deck_count}")
+    # return
+
     for commander in commanders:
-        client.set_build_id()
-        save_decks(commander, client)
+        if is_unique_commander(commander, formatted_flavor_names):
+            save_decks(commander, client)
+        else:
+            print(f"Skipping {commander}.")
 
 
 if __name__ == "__main__":
