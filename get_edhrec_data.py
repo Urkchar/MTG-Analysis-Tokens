@@ -1,208 +1,32 @@
 import time
-import threading
 from typing import Optional
-from email.utils import parsedate_to_datetime
 import requests
-import random
 import re
 from bs4 import BeautifulSoup
 import json
 from pathlib import Path
 import xml.etree.ElementTree as ET
 from tqdm import tqdm
+from pprint import pprint
 
-
-class TokenBucket:
-    def __init__(self, rate_per_sec: float, capacity: int):
-        """
-        Simple thread-safe token bucket.
-
-        rate_per_sec: tokens added per second (average rate allowed)
-        capacity: max burst (bucket size)
-        """
-        if rate_per_sec <= 0:
-            raise ValueError("rate_per_sec must be > 0")
-        if capacity <= 0:
-            raise ValueError("capacity must be > 0")
-
-        self.rate = float(rate_per_sec)
-        self.capacity = int(capacity)
-        self.tokens = float(capacity)
-        self.last = time.monotonic()
-        self.lock = threading.Lock()
-
-    def _refill(self):
-        now = time.monotonic()
-        elapsed = now - self.last
-        if elapsed > 0:
-            self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
-            self.last = now
-
-    def acquire(self, n: float = 1.0):
-        """Block until at least n tokens are available, then consume them."""
-        if n <= 0:
-            return
-        while True:
-            with self.lock:
-                self._refill()
-                if self.tokens >= n:
-                    self.tokens -= n
-                    return
-                deficit = n - self.tokens
-                wait = deficit / self.rate
-            # Avoid tight loops; sleep long enough to fill the deficit
-            time.sleep(min(wait, 0.25))
-
-
-# -----------------------------
-# Retry/backoff helpers
-# -----------------------------
-def _parse_retry_after_seconds(value: Optional[str]) -> Optional[float]:
-    """
-    Parses Retry-After header which may be:
-    - Integer seconds (e.g., "3")
-    - HTTP-date (e.g., "Wed, 21 Oct 2015 07:28:00 GMT")
-    Returns seconds to wait, or None if invalid.
-    """
-    if not value:
-        return None
-    v = value.strip()
-    if v.isdigit():
-        return float(v)
-    try:
-        dt = parsedate_to_datetime(v)
-        if dt is not None:
-            return max(0.0, dt.timestamp() - time.time())
-    except Exception:
-        pass
-    return None
-
-
-def _is_retryable_request_error(e: Exception) -> bool:
-    """
-    Conservative retry policy for requests exceptions.
-    Retries on 403, 408, 425, 429, 5xx and common transient network errors/timeouts.
-    """
-    if isinstance(e, requests.HTTPError) and e.response is not None:
-        status = e.response.status_code
-        if status in {403, 408, 425, 429, 500, 502, 503, 504}:
-            return True
-        return False  # Non-retryable HTTP error
-
-    # Connection/timeout/transient issues
-    transient_types = (
-        requests.Timeout,
-        requests.ConnectionError,
-        requests.exceptions.ChunkedEncodingError,
-        requests.exceptions.ContentDecodingError,
-        requests.exceptions.SSLError,
-    )
-    return isinstance(e, transient_types)
-
-
-def _compute_backoff_seconds(
-    attempt: int,
-    *,
-    base_delay: float,
-    max_delay: float,
-    jitter: str = "full",
-) -> float:
-    """
-    Exponential backoff with optional jitter.
-    attempt: 1-based attempt index (1 = first retry)
-    jitter: "full" | "equal" | "none" | "decorrelated"
-    """
-    backoff = min(max_delay, base_delay * (2 ** (attempt - 1)))
-
-    if jitter == "full":
-        return random.uniform(0, backoff)
-    elif jitter == "equal":
-        return backoff / 2.0 + random.uniform(0, backoff / 2.0)
-    elif jitter == "decorrelated":
-        # Decorrelated jitter: next = rand(base, backoff*3) but cap at max_delay
-        return min(max_delay, random.uniform(base_delay, backoff * 3))
-    else:  # "none"
-        return backoff
+from scryfall import Scryfall
+from token_bucket import HTTPClient
 
 
 class EDHRec:
     def __init__(
             self,
             *,
-            session: Optional[requests.Session] = None,
-            rate_per_sec: float = 5.0,
-            burst: int = 10
+            rate_per_sec: float = 1.0,
         ):
-        self.session = session or requests.Session()
-        self._limiter = TokenBucket(rate_per_sec=rate_per_sec, capacity=burst)
-
+        self._http_client = HTTPClient(rate_per_sec=rate_per_sec)
         self.base_url = "https://edhrec.com/"
         self.base_next_js_url = f"{self.base_url}/_next/data/"
         self.build_id = self.get_build_id()
 
-    def _get(
-            self,
-            url: str,
-            *,
-            timeout: float = 10.0,   # per-request timeout (seconds)
-            max_retries: int = 5,   # number of retries on transient failures
-            base_delay: float = 30.0,   # base backoff (seconds)
-            max_delay: float = 600.0,   # max backoff (seconds)
-            jitter: str = "full",   # "full" | "equal" | "decorrelated" | "none"
-            token_cost: float = 1.0,   # tokens consumed per attempt
-            **request_kwargs   # pass extra requests.get kwargs if needed
-        ) -> Optional[requests.Response]:
-        """
-        Resilient GET with client-side rate limiting, retries, and jittered backoff.
-        Honors Retry-After when present.
-        """
-
-        attempt = 0
-
-        while True:
-            # Rate-limit the attempt (counts even if it fails)
-            self._limiter.acquire(token_cost)
-
-            try:
-                resp = self.session.get(url, timeout=timeout, **request_kwargs)
-                if resp.status_code == 404:
-                    print(f"\nWarning: 404 Not Found for {url}")
-                    self.set_build_id()  # Refresh build_id in case of stale cache causing 404s
-                    return None
-                resp.raise_for_status()
-                return resp
-
-            except Exception as e:
-                # Non-retryable -> propagate
-                if not _is_retryable_request_error(e):
-                    print(f"Non-retryable error for {url}")
-                    raise
-
-                attempt += 1
-                if attempt > max_retries:
-                    print(f"Exceeded max retries for {url}")
-                    raise
-
-                # Prefer server-provided Retry-After when present
-                sleep_for = None
-                if isinstance(e, requests.HTTPError) and e.response is not None:
-                    retry_after = _parse_retry_after_seconds(
-                        e.response.headers.get("Retry-After") or e.response.headers.get("retry-after")
-                    )
-                    if retry_after is not None:
-                        sleep_for = min(retry_after, max_delay)
-
-                # Otherwise use exponential backoff + jitter
-                if sleep_for is None:
-                    sleep_for = _compute_backoff_seconds(
-                        attempt, base_delay=base_delay, max_delay=max_delay, jitter=jitter
-                    )
-
-                time.sleep(sleep_for)
-
     def get_build_id(self) -> str:
         """Fetch HTML and parse __NEXT_DATA__ to get buildId."""
-        html = self._get(self.base_url).text
+        html = self._http_client.get(self.base_url).text
         soup = BeautifulSoup(html, "html.parser")
         s = soup.find("script", id="__NEXT_DATA__")
         if not s or not s.string:
@@ -232,13 +56,13 @@ class EDHRec:
     
     def get_decks(self, commander: str):
         url = self.build_next_js_url("decks", commander)
-        resp = self._get(url)
+        resp = self._http_client.get(url)
         data = resp.json()["pageProps"]["data"]["table"]
         return data
     
     def get_deck(self, url_hash: str):
         url = self.build_next_js_url("deckpreview", url_hash)
-        resp = self._get(url)
+        resp = self._http_client.get(url)
         if not resp:
             return None
         data = resp.json()["pageProps"]["data"]["panels"]["deckinfo"]["deck_preview"]
@@ -256,48 +80,73 @@ class EDHRec:
         slim = {k: v for k, v in data.items() if k in keep}
         return slim
 
+    def save_decks(self, commander: str):
+        decks = self.get_decks(commander)
+        print(f"Found {len(decks)} decks for {commander}")
 
-def save_decks(commander: str, client: EDHRec):
-    decks = client.get_decks(commander)
-    print(f"Found {len(decks)} decks for {commander}")
+        Path(f"decks/{commander}").mkdir(parents=True, exist_ok=True)
 
-    Path(f"decks/{commander}").mkdir(parents=True, exist_ok=True)
+        for deck in tqdm(decks):
+            url_hash = deck["urlhash"]
+            if Path(f"decks/{commander}/{url_hash}.json").is_file():
+                continue  # Skip if we already have this deck
+            deck_data = self.get_deck(url_hash)
+            if deck_data is not None:
+                with open(f"decks/{commander}/{url_hash}.json", "w") as f:
+                    json.dump(deck_data, f)
 
-    for deck in tqdm(decks):
-        url_hash = deck["urlhash"]
-        if Path(f"decks/{commander}/{url_hash}.json").is_file():
-            continue  # Skip if we already have this deck
-        deck_data = client.get_deck(url_hash)
-        if deck_data is not None:
-            with open(f"decks/{commander}/{url_hash}.json", "w") as f:
-                json.dump(deck_data, f)
-
-
-def count_decks(commander: str, client: EDHRec) -> int:
-    decks = client.get_decks(commander)
-    return len(decks)   # All decks for all commanders: 9,283,036. Not including flavor names: 8,314,401
+    def count_decks(self, commander: str) -> int:
+        decks = self.get_decks(commander)
+        return len(decks)   # All decks for all commanders: 9,283,036. Not including flavor names: 8,314,401
 
 
 def format_commander_name(name: str) -> str:
     # EDHRec formats commander names in URLs by lowercasing and replacing non-alphanumerics with hyphens
-    f = name.lower()
-    f = re.sub(r"[^a-z0-9]+", "-", f)
-    f = re.sub(r"-+", "-", f)
-    f = f.strip("-")
-    return f
+    formatted = name.lower()
+    formatted = formatted.replace("'", "")
+    formatted = re.sub(r"[^a-z0-9]+", "-", formatted)
+    formatted = re.sub(r"-+", "-", formatted)
+    return formatted.strip("-")
 
 
-def is_unique_commander(commander: str, formatted_flavor_names: list) -> bool:
+def is_valid_commander(commander: str, invalid_commanders: list) -> bool:
     formatted_commander = format_commander_name(commander)
     # print(formatted_flavor_names)
 
-    for formatted_flavor_name in formatted_flavor_names:
-        if formatted_flavor_name in formatted_commander:
+    for invalid_commander in invalid_commanders:
+        if invalid_commander in formatted_commander:
             return False
     return True
 
 
-def main():
+def get_invalid_commanders() -> set:
+    invalid_commanders = set()
+    scryfall_client = Scryfall()
+
+    # Some commanders have a flavor name, but are the same card ("Mina Harker" == "Thalia, Guardian of Thraben")
+    cards = scryfall_client.search(q_has="flavor_name", q_prints=">1", q_is="commander")
+    assert len(cards) == 126
+    flavor_names = [card["flavor_name"] if "flavor_name" in card else card["card_faces"][0]["flavor_name"] for card in cards]
+    invalid_commanders.update(flavor_names)
+
+    # Some commanders have in-universe versions, but not flavor names
+    cards = scryfall_client.search(q_in="slx", q_is="commander")
+    assert len(cards) == 28
+    names = [card["name"] for card in cards]
+    invalid_commanders.update(names)
+    # Themberchaud has an in-universe version, but its name is the same.
+    invalid_commanders.remove("Themberchaud")
+
+    # Commanders from Through the Omenpaths have no flavor name, but are the same mechanically as their orginal version from Marvel's Spider-Man
+    cards = scryfall_client.search(q_set="om1", q_is="commander")
+    assert len(cards) == 79
+    names = [card["printed_name"] if "printed_name" in card else card["card_faces"][0]["printed_name"] for card in cards]
+    invalid_commanders.update(names)
+
+    return {format_commander_name(name) for name in invalid_commanders}
+
+
+def get_commanders() -> list:
     NS = {"sm": "https://www.sitemaps.org/schemas/sitemap/0.9"}
     DECKS_SITEMAP = "https://edhrec.com/sitemaps/decks.xml"
 
@@ -308,10 +157,10 @@ def main():
     # Parse XML
     root = ET.fromstring(resp.text)
 
+    invalid_commanders = get_invalid_commanders()
     commanders = []
     # Find all <url> elements within the sitemap namespace
     for url_tag in root.findall("sm:url", NS):
-        # print(f"Processing {url_tag} in sitemap...")
         loc_tag = url_tag.find("sm:loc", NS)
         if loc_tag is None:
             print("Warning: <url> without <loc> found in sitemap; skipping.")
@@ -321,44 +170,21 @@ def main():
         # Extract commander name: everything after "/decks/"
         if "/decks/" in url:
             commander = url.split("/decks/", 1)[1].strip("/")
-            commanders.append(commander)
+            if is_valid_commander(commander, invalid_commanders):
+                commanders.append(commander)
+
+    return commanders
+
+
+def main():
+    commanders = get_commanders()
+    print(f"Found {len(commanders)} unique commanders with decks on EDHRec.")
 
     client = EDHRec(rate_per_sec=3)
     print(f"build_id: {client.build_id}")   # kZWgTuW-iC6XkpNPLm0y9, 2/18/2026 10:09 PM
 
-    # Some commanders have a flavor name, but are the same card ("Mina Harker" == "Thalia, Guardian of Thraben")
-    scryfall_query = "https://api.scryfall.com/cards/search?as=grid&q=has%3Aflavor_name+prints%3E1+%2B%2B+is%3Acommander&unique=cards"
-    resp = requests.get(scryfall_query)
-    resp.raise_for_status()
-
-    # print(resp.json())
-    cards = resp.json().get("data")
-    fields = set()
-    for card in cards:
-        fields.update(card.keys())
-    # pprint(sorted(fields))
-    # names = [card["name"] for card in cards]
-    flavor_names = [card["flavor_name"] if "flavor_name" in card else card["card_faces"][0]["flavor_name"] for card in cards]
-
-    # Names in EDHRec are formatted ("Thalia, Guardian of Thraben" → "thalia-guardian-of-thraben")
-    formatted_flavor_names = [format_commander_name(fn) for fn in flavor_names]
-
-    # deck_count = 0
-    # for commander in commanders:
-    #     if not is_unique_commander(commander, formatted_flavor_names):
-    #         print(f"Skipping {commander} due to non-unique commander name.")
-    #         continue
-    #     count = count_decks(commander, client)
-    #     print(f"{commander}: {count} deck(s)")
-    #     deck_count += count
-    # print(f"Total decks across all commanders: {deck_count}")
-    # return
-
     for commander in commanders:
-        if is_unique_commander(commander, formatted_flavor_names):
-            save_decks(commander, client)
-        else:
-            print(f"Skipping {commander}.")
+        client.save_decks(commander)
 
 
 if __name__ == "__main__":
