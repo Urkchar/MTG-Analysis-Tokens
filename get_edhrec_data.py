@@ -1,5 +1,3 @@
-import time
-from typing import Optional
 import requests
 import re
 from bs4 import BeautifulSoup
@@ -7,7 +5,6 @@ import json
 from pathlib import Path
 import xml.etree.ElementTree as ET
 from tqdm import tqdm
-from pprint import pprint
 
 from scryfall import Scryfall
 from token_bucket import HTTPClient
@@ -62,7 +59,12 @@ class EDHRec:
     
     def get_deck(self, url_hash: str):
         url = self.build_next_js_url("deckpreview", url_hash)
-        resp = self._http_client.get(url)
+        try:
+            resp = self._http_client.get(url)
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                self.set_build_id()
+                return None
         if not resp:
             return None
         data = resp.json()["pageProps"]["data"]["panels"]["deckinfo"]["deck_preview"]
@@ -111,7 +113,6 @@ def format_commander_name(name: str) -> str:
 
 def is_valid_commander(commander: str, invalid_commanders: list) -> bool:
     formatted_commander = format_commander_name(commander)
-    # print(formatted_flavor_names)
 
     for invalid_commander in invalid_commanders:
         if invalid_commander in formatted_commander:
@@ -181,7 +182,6 @@ def main():
     print(f"Found {len(commanders)} unique commanders with decks on EDHRec.")
 
     client = EDHRec(rate_per_sec=3)
-    print(f"build_id: {client.build_id}")   # kZWgTuW-iC6XkpNPLm0y9, 2/18/2026 10:09 PM
 
     for commander in commanders:
         client.save_decks(commander)
