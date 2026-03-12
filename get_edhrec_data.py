@@ -181,7 +181,7 @@ def main():
     commanders = get_commanders()
     print(f"Found {len(commanders)} unique commanders with decks on EDHRec.")
 
-    client = EDHRec(rate_per_sec=3)
+    client = EDHRec(rate_per_sec=2)
 
     for commander in commanders:
         client.save_decks(commander)
