@@ -68,7 +68,8 @@ def _compute_backoff_seconds(
     elif jitter == "equal":
         return backoff / 2.0 + random.uniform(0, backoff / 2.0)
     elif jitter == "decorrelated":
-        # Decorrelated jitter: next = rand(base, backoff*3) but cap at max_delay
+        # Decorrelated jitter: next = rand(base, backoff*3) but cap at 
+        # max_delay
         return min(max_delay, random.uniform(base_delay, backoff * 3))
     else:  # "none"
         return backoff
@@ -132,11 +133,13 @@ class HTTPClient:
             max_retries: int = 5,   # number of retries on transient failures
             base_delay: float = 30.0,   # base backoff (seconds)
             max_delay: float = 600.0,   # max backoff (seconds)
-            jitter: str = "full",   # "full" | "equal" | "decorrelated" | "none"
+            jitter: str = "full",   # "full" | "equal" | "decorrelated" | 
+                                    # "none"
             **request_kwargs   # pass extra requests.get kwargs if needed
         ) -> Optional[requests.Response]:
         """
-        Resilient GET with client-side rate limiting, retries, and jittered backoff.
+        Resilient GET with client-side rate limiting, retries, and jittered 
+        backoff.
         Honors Retry-After when present.
         """
 
@@ -147,7 +150,11 @@ class HTTPClient:
             self._limiter.acquire()
 
             try:
-                resp = requests.get(url, timeout=timeout, headers=self.headers, **request_kwargs)
+                resp = requests.get(
+                    url,
+                    timeout=timeout,
+                    headers=self.headers,
+                    **request_kwargs)
                 resp.raise_for_status()
                 return resp
 
@@ -164,18 +171,21 @@ class HTTPClient:
 
                 # Prefer server-provided Retry-After when present
                 sleep_for = None
-                if isinstance(e, requests.HTTPError) and e.response is not None:
+                if (isinstance(e, requests.HTTPError)
+                    and e.response is not None):
                     retry_after = _parse_retry_after_seconds(
-                        e.response.headers.get("Retry-After") or e.response.headers.get("retry-after")
-                    )
+                        (e.response.headers.get("Retry-After")
+                         or e.response.headers.get("retry-after")))
                     if retry_after is not None:
                         sleep_for = min(retry_after, max_delay)
 
                 # Otherwise use exponential backoff + jitter
                 if sleep_for is None:
                     sleep_for = _compute_backoff_seconds(
-                        attempt, base_delay=base_delay, max_delay=max_delay, jitter=jitter
-                    )
+                        attempt,
+                        base_delay=base_delay,
+                        max_delay=max_delay,
+                        jitter=jitter)
 
                 time.sleep(sleep_for)
 
@@ -183,7 +193,9 @@ class HTTPClient:
 if __name__ == "__main__":
     client = HTTPClient(rate_per_sec=10.0)
     try:
-        response = client.get("https://api.scryfall.com/cards/search?q=prints%3E1+is%3Acommander")
+        url = ("https://api.scryfall.com/cards/search?"
+        "q=prints%3E1+is%3Acommander")
+        response = client.get(url)
         if response:
             data = response.json()
             print(f"Fetched {len(data.get('data', []))} cards.")
