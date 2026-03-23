@@ -4,6 +4,7 @@ import requests
 from email.utils import parsedate_to_datetime
 from typing import Optional
 import random
+import logging
 
 
 def _parse_retry_after_seconds(value: Optional[str]) -> Optional[float]:
@@ -161,12 +162,12 @@ class HTTPClient:
             except Exception as e:
                 # Non-retryable -> propagate
                 if not _is_retryable_request_error(e):
-                    # print(f"Non-retryable error for {url}")
+                    logging.error(f"Non-retryable error for {url}\n{e}")
                     raise
 
                 attempt += 1
                 if attempt > max_retries:
-                    print(f"Exceeded max retries for {url}")
+                    logging.error(f"Exceeded max retries for {url}")
                     raise
 
                 # Prefer server-provided Retry-After when present
