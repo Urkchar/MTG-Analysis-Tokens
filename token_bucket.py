@@ -7,6 +7,9 @@ import random
 import logging
 
 
+logging.getLogger("requests").setLevel(logging.WARNING)
+
+
 def _parse_retry_after_seconds(value: Optional[str]) -> Optional[float]:
     """
     Parses Retry-After header which may be:
