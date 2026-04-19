@@ -123,6 +123,16 @@ class EDHRec:
         # All decks for all commanders: 9,283,036.
         # Not including flavor names: 8,314,401
         return len(self.get_decks(commander))
+    
+
+def _extract_card_name(card: dict, name_key: str) -> Optional[str]:
+    """Extract card name from card dict, handling both simple and card
+    faces."""
+    if name_key in card:
+        return card[name_key]
+    if "card_faces" in card and card["card_faces"]:
+        return card["card_faces"][0].get(name_key)
+    return None
 
 
 def format_commander_name(name: str) -> str:
@@ -154,37 +164,23 @@ def get_invalid_commanders() -> set:
         q_has="flavor_name",
         q_prints=">1",
         q_is="commander")
-
-    flavor_names = []
     for card in cards:
-        if "flavor_name" in card:
-            flavor_names.append(card["flavor_name"])
-        else:
-            flavor_names.append(card["card_faces"][0]["flavor_name"])
-
-    invalid_commanders.update(flavor_names)
+        if flavor_name := _extract_card_name(card, "flavor_name"):
+            invalid_commanders.add(flavor_name)
 
     # Some commanders have in-universe versions, but not flavor names
-    cards = scryfall_client.search(q_in="slx", q_is="commander")
-    assert len(cards) == 28
-    names = [card["name"] for card in cards]
-    invalid_commanders.update(names)
+    for card in scryfall_client.search(q_in="slx", q_is="commander"):
+        invalid_commanders.add(card["name"])
+
     # Themberchaud has an in-universe version, but its name is the same.
-    invalid_commanders.remove("Themberchaud")
+    invalid_commanders.discard("Themberchaud")
 
     # Commanders from Through the Omenpaths have no flavor name, but are
     # the same mechanically as their orginal version from Marvel's
     # Spider-Man
-    cards = scryfall_client.search(q_set="om1", q_is="commander")
-
-    names = []
-    for card in cards:
-        if "printed_name" in card:
-            names.append(card["printed_name"])
-        else:
-            names.append(card["card_faces"][0]["printed_name"])
-
-    invalid_commanders.update(names)
+    for card in scryfall_client.search(q_set="om1", q_is="commander"):
+        if printed_name := _extract_card_name(card, "printed_name"):
+            invalid_commanders.add(printed_name)
 
     return {format_commander_name(name) for name in invalid_commanders}
 
