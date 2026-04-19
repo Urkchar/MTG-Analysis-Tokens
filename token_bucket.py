@@ -71,30 +71,11 @@ def _is_rate_limit_redirect(resp: requests.Response) -> bool:
         return False
 
 
-def _compute_backoff_seconds(
-    attempt: int,
-    *,
-    base_delay: float,
-    max_delay: float,
-    jitter: str = "full",
-) -> float:
-    """
-    Exponential backoff with optional jitter.
-    attempt: 1-based attempt index (1 = first retry)
-    jitter: "full" | "equal" | "none" | "decorrelated"
-    """
+def _compute_backoff_seconds(attempt: int, base_delay: float, max_delay: float
+                             ) -> float:
+    """Exponential backoff with full jitter."""
     backoff = min(max_delay, base_delay * (2 ** (attempt - 1)))
-
-    if jitter == "full":
-        return random.uniform(0, backoff)
-    elif jitter == "equal":
-        return backoff / 2.0 + random.uniform(0, backoff / 2.0)
-    elif jitter == "decorrelated":
-        # Decorrelated jitter: next = rand(base, backoff*3) but cap at
-        # max_delay
-        return min(max_delay, random.uniform(base_delay, backoff * 3))
-    else:  # "none"
-        return backoff
+    return random.uniform(0, backoff)
 
 
 class TokenBucket:
@@ -156,8 +137,6 @@ class HTTPClient:
         max_retries: int = 5,   # number of retries on transient failures
         base_delay: float = 30.0,   # base backoff (seconds)
         max_delay: float = 1000.0,   # max backoff (seconds)
-        jitter: str = "full",   # "full" | "equal" | "decorrelated" |
-        # "none"
         **request_kwargs   # pass extra requests.get kwargs if needed
     ) -> Optional[requests.Response]:
         """
@@ -218,8 +197,7 @@ class HTTPClient:
                     sleep_for = _compute_backoff_seconds(
                         attempt,
                         base_delay=base_delay,
-                        max_delay=max_delay,
-                        jitter=jitter)
+                        max_delay=max_delay)
 
                 time.sleep(sleep_for)
 
