@@ -1,28 +1,41 @@
+from typing import Optional
 import requests
 import re
 from bs4 import BeautifulSoup
 import json
 from pathlib import Path
 import xml.etree.ElementTree as ET
-from tqdm import tqdm
 import logging
+import time
 
 from scryfall import Scryfall
 from token_bucket import HTTPClient
+from utils import format_time
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+logging.basicConfig(level=logging.DEBUG, format="%(levelname)s: %(message)s")
 
 
 class EDHRec:
     def __init__(
-            self,
-            *,
-            rate_per_sec: float = 1.0,
-        ):
+        self,
+        *,
+        rate_per_sec: float = 1.0,
+    ):
         self._http_client = HTTPClient(rate_per_sec=rate_per_sec)
         self.base_url = "https://edhrec.com/"
         self.base_next_js_url = f"{self.base_url}/_next/data/"
         self.build_id = self.get_build_id()
+
+    def _get(self, url: str) -> Optional[requests.Response]:
+        try:
+            resp = self._http_client.get(url)
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                logging.warning(f"URL {url} not found (404).")
+                return None
+            raise
+
+        return resp
 
     def get_build_id(self) -> str:
         """Fetch HTML and parse __NEXT_DATA__ to get buildId."""
@@ -31,7 +44,7 @@ class EDHRec:
         s = soup.find("script", id="__NEXT_DATA__")
         if not s or not s.string:
             raise RuntimeError("Could not locate __NEXT_DATA__ on the page.")
-        
+
         data = json.loads(s.string)
         build_id = data.get("buildId")
 
@@ -48,50 +61,26 @@ class EDHRec:
 
     def set_build_id(self):
         self.build_id = self.get_build_id()
-    
+
     def build_next_js_url(self, route: str, identifier: str) -> str:
         """identifier is a formatted commander name or a URL hash"""
         url = (f"{self.base_next_js_url}/{self.build_id}/{route}/{identifier}"
-                ".json")
+               ".json")
         return url
-    
-    def _get_retry_once(self, route: str, identifier: str):
-        url = self.build_next_js_url(route, identifier)
 
-        # build_id could be stale. If we get a 404, refresh the build_id
-        # and try again once.
-        try:
-            resp = self._http_client.get(url)
-            return resp
-        except requests.exceptions.HTTPError as e:
-            logging.warning("HTTPError in _get_retry_once.")
-            if e.response is not None and e.response.status_code == 404:
-                logging.debug("Status code was 404. Retrying once...")
-                self.set_build_id()
-                # Rebuild the URL with the new build_id
-                url = self.build_next_js_url(route, identifier)
-                try:
-                    resp = self._http_client.get(url)
-                    return resp
-                except requests.exceptions.HTTPError as e2:
-                    if (e2.response is not None
-                        and e2.response.status_code == 404):
-                        logging.warning(
-                            "Second retry returned 404, returning None.")
-                        return None
-                    raise
-            else:
-                logging.error("Status code was not 404. Raising.")
-                raise
-    
     def get_decks(self, commander: str):
-        resp = self._get_retry_once("decks", commander)
-        data = resp.json()["pageProps"]["data"]["table"]
+        url = self.build_next_js_url("decks", commander)
+        resp = self._get(url)
+        page_props = resp.json()["pageProps"]
+
+        # TODO: resp can be None
+        data = page_props["data"]["table"]
         return data
-    
+
     def get_deck(self, url_hash: str):
-        resp = self._get_retry_once("deckpreview", url_hash)
-        data = resp.json()["pageProps"]["data"]
+        url = self.build_next_js_url("deckpreview", url_hash)
+        resp = self._get(url)
+        data = resp.json()["page_props"]["data"]
         deck_preview = data["panels"]["deckinfo"]["deck_preview"]
         keep = {
             "cedh",
@@ -107,30 +96,44 @@ class EDHRec:
         slim = {k: v for k, v in deck_preview.items() if k in keep}
         return slim
 
+    def _report_rate(self, num_decks: int, seconds: int, new_decks: int):
+        rate = num_decks / seconds if seconds > 0 else float('inf')
+        rate_str = f" ({round(rate)}/s)." if new_decks > 1 else "."
+        logging.info((f"Saved {new_decks} new deck(s) in "
+                      f"{format_time(int(seconds))}" + rate_str))
+
     def save_decks(self, commander: str):
+        start_time = time.perf_counter()
         decks = self.get_decks(commander)
-        print(f"Found {len(decks)} decks for {commander}")
+        logging.info(f"Saving {len(decks)} deck(s) for {commander}...")
 
         Path(f"decks/{commander}").mkdir(parents=True, exist_ok=True)
 
-        for deck in tqdm(decks):
-            url_hash = deck["urlhash"]
+        new_decks = 0
+        for deck in decks:
+            url_hash = deck["urlhash"]   # Deck ID
             if Path(f"decks/{commander}/{url_hash}.json").is_file():
                 continue  # Skip if we already have this deck
+            new_decks += 1
             deck_data = self.get_deck(url_hash)
             if deck_data is not None:
                 with open(f"decks/{commander}/{url_hash}.json", "w") as f:
                     json.dump(deck_data, f)
 
+        end_time = time.perf_counter()
+        seconds = end_time - start_time
+        self._report_rate(len(decks), seconds, new_decks)
+
     def count_decks(self, commander: str) -> int:
         decks = self.get_decks(commander)
-        return len(decks)   # All decks for all commanders: 9,283,036.
-                            # Not including flavor names: 8,314,401
+        # All decks for all commanders: 9,283,036.
+        # Not including flavor names: 8,314,401
+        return len(decks)
 
 
 def format_commander_name(name: str) -> str:
-    # EDHRec formats commander names in URLs by lowercasing and replacing
-    # non-alphanumerics with hyphens
+    # EDHRec formats commander names in URLs by lowercasing and
+    # replacing non-alphanumerics with hyphens
     formatted = name.lower()
     formatted = formatted.replace("'", "")
     formatted = re.sub(r"[^a-z0-9]+", "-", formatted)
@@ -175,8 +178,9 @@ def get_invalid_commanders() -> set:
     # Themberchaud has an in-universe version, but its name is the same.
     invalid_commanders.remove("Themberchaud")
 
-    # Commanders from Through the Omenpaths have no flavor name, but are the
-    # same mechanically as their orginal version from Marvel's Spider-Man
+    # Commanders from Through the Omenpaths have no flavor name, but are
+    # the same mechanically as their orginal version from Marvel's
+    # Spider-Man
     cards = scryfall_client.search(q_set="om1", q_is="commander")
 
     names = []
@@ -208,7 +212,7 @@ def get_commanders() -> list:
     for url_tag in root.findall("sm:url", NS):
         loc_tag = url_tag.find("sm:loc", NS)
         if loc_tag is None:
-            print("Warning: <url> without <loc> found in sitemap; skipping.")
+            logging.warning("<url> without <loc> found in sitemap; skipping.")
             continue
 
         url = loc_tag.text.strip()
@@ -227,7 +231,7 @@ def main():
 
     client = EDHRec(rate_per_sec=2)
 
-    for commander in commanders:
+    for commander in commanders[5030:]:
         client.save_decks(commander)
 
 

@@ -7,7 +7,7 @@ import random
 import logging
 
 
-logging.getLogger("requests").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
 def _parse_retry_after_seconds(value: Optional[str]) -> Optional[float]:
@@ -34,11 +34,12 @@ def _parse_retry_after_seconds(value: Optional[str]) -> Optional[float]:
 def _is_retryable_request_error(e: Exception) -> bool:
     """
     Conservative retry policy for requests exceptions.
-    Retries on 403, 408, 425, 5xx and common transient network errors/timeouts.
+    Retries on 403, 408, 425, 429, 5xx and common transient network 
+    errors/timeouts.
     """
     if isinstance(e, requests.HTTPError) and e.response is not None:
         status = e.response.status_code
-        if status in {403, 408, 425, 500, 502, 503, 504}:
+        if status in {403, 408, 425, 429, 500, 502, 503, 504}:
             return True
         return False  # Non-retryable HTTP error
 
@@ -51,6 +52,23 @@ def _is_retryable_request_error(e: Exception) -> bool:
         requests.exceptions.SSLError,
     )
     return isinstance(e, transient_types)
+
+
+def _is_rate_limit_redirect(resp: requests.Response) -> bool:
+    """
+    Check if response contains a rate limit redirect pattern.
+    Some servers return 200 with pageProps.__N_REDIRECT == '/429' 
+    instead of actual 429 status code.
+    """
+    if resp.status_code != 200:
+        return False
+
+    try:
+        data = resp.json()
+        page_props = data.get("pageProps", {})
+        return page_props.get("__N_REDIRECT") == "/429"
+    except (ValueError, KeyError, AttributeError):
+        return False
 
 
 def _compute_backoff_seconds(
@@ -72,7 +90,7 @@ def _compute_backoff_seconds(
     elif jitter == "equal":
         return backoff / 2.0 + random.uniform(0, backoff / 2.0)
     elif jitter == "decorrelated":
-        # Decorrelated jitter: next = rand(base, backoff*3) but cap at 
+        # Decorrelated jitter: next = rand(base, backoff*3) but cap at
         # max_delay
         return min(max_delay, random.uniform(base_delay, backoff * 3))
     else:  # "none"
@@ -106,7 +124,8 @@ class TokenBucket:
             self.last = now
 
     def acquire(self, n: float = 1.0):
-        """Block until at least n tokens are available, then consume them."""
+        """Block until at least n tokens are available, then consume 
+        them."""
         if n <= 0:
             return
         while True:
@@ -130,20 +149,20 @@ class HTTPClient:
         }
 
     def get(
-            self,
-            url: str,
-            *,
-            timeout: float = 10.0,   # per-request timeout (seconds)
-            max_retries: int = 5,   # number of retries on transient failures
-            base_delay: float = 30.0,   # base backoff (seconds)
-            max_delay: float = 600.0,   # max backoff (seconds)
-            jitter: str = "full",   # "full" | "equal" | "decorrelated" | 
-                                    # "none"
-            **request_kwargs   # pass extra requests.get kwargs if needed
-        ) -> Optional[requests.Response]:
+        self,
+        url: str,
+        *,
+        timeout: float = 10.0,   # per-request timeout (seconds)
+        max_retries: int = 5,   # number of retries on transient failures
+        base_delay: float = 30.0,   # base backoff (seconds)
+        max_delay: float = 1000.0,   # max backoff (seconds)
+        jitter: str = "full",   # "full" | "equal" | "decorrelated" |
+        # "none"
+        **request_kwargs   # pass extra requests.get kwargs if needed
+    ) -> Optional[requests.Response]:
         """
-        Resilient GET with client-side rate limiting, retries, and jittered 
-        backoff.
+        Resilient GET with client-side rate limiting, retries, and 
+        jittered backoff.
         Honors Retry-After when present.
         """
 
@@ -160,6 +179,17 @@ class HTTPClient:
                     headers=self.headers,
                     **request_kwargs)
                 resp.raise_for_status()
+
+                # Check for rate limit redirect pattern
+                if _is_rate_limit_redirect(resp):
+                    # Treat as retryable error (429-like)
+                    err = requests.exceptions.HTTPError(
+                        "Rate limit redirect (429)"
+                    )
+                    resp.status_code = 429
+                    err.response = resp
+                    raise err
+
                 return resp
 
             except Exception as e:
@@ -176,7 +206,7 @@ class HTTPClient:
                 # Prefer server-provided Retry-After when present
                 sleep_for = None
                 if (isinstance(e, requests.HTTPError)
-                    and e.response is not None):
+                        and e.response is not None):
                     retry_after = _parse_retry_after_seconds(
                         (e.response.headers.get("Retry-After")
                          or e.response.headers.get("retry-after")))
@@ -191,6 +221,9 @@ class HTTPClient:
                         max_delay=max_delay,
                         jitter=jitter)
 
+                logging.warning(f"Retrying {url} after error: {e}\n"
+                                f"Attempt {attempt}/{max_retries}, "
+                                f"sleeping for {sleep_for:.1f} seconds...")
                 time.sleep(sleep_for)
 
 
@@ -198,7 +231,7 @@ if __name__ == "__main__":
     client = HTTPClient(rate_per_sec=10.0)
     try:
         url = ("https://api.scryfall.com/cards/search?"
-        "q=prints%3E1+is%3Acommander")
+               "q=prints%3E1+is%3Acommander")
         response = client.get(url)
         if response:
             data = response.json()
