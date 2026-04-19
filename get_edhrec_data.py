@@ -191,10 +191,7 @@ def get_invalid_commanders() -> set:
 
 def get_commanders() -> list:
     NS = {"sm": "https://www.sitemaps.org/schemas/sitemap/0.9"}
-    DECKS_SITEMAP = "https://edhrec.com/sitemaps/decks.xml"
-
-    # Fetch XML
-    resp = requests.get(DECKS_SITEMAP)
+    resp = requests.get("https://edhrec.com/sitemaps/decks.xml")
     resp.raise_for_status()
 
     # Parse XML
@@ -202,14 +199,14 @@ def get_commanders() -> list:
 
     invalid_commanders = get_invalid_commanders()
     commanders = []
+
     # Find all <url> elements within the sitemap namespace
     for url_tag in root.findall("sm:url", NS):
-        loc_tag = url_tag.find("sm:loc", NS)
-        if loc_tag is None:
+        url = url_tag.findtext("sm:loc", "", NS)
+        if not url:
             logging.warning("<url> without <loc> found in sitemap; skipping.")
             continue
 
-        url = loc_tag.text.strip()
         # Extract commander name: everything after "/decks/"
         if "/decks/" in url:
             commander = url.split("/decks/", 1)[1].strip("/")
