@@ -201,7 +201,7 @@ class HTTPClient:
                 attempt += 1
                 if attempt > max_retries:
                     logging.error(f"Exceeded max retries for {url}")
-                    raise
+                    return None
 
                 # Prefer server-provided Retry-After when present
                 sleep_for = None
@@ -221,9 +221,6 @@ class HTTPClient:
                         max_delay=max_delay,
                         jitter=jitter)
 
-                logging.warning(f"Retrying {url} after error: {e}\n"
-                                f"Attempt {attempt}/{max_retries}, "
-                                f"sleeping for {sleep_for:.1f} seconds...")
                 time.sleep(sleep_for)
 
 
