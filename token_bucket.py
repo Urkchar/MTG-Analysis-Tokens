@@ -122,84 +122,62 @@ class TokenBucket:
 
 
 class HTTPClient:
-    def __init__(self, rate_per_sec: float = 1.0, burst: int = 10):
+    def __init__(
+        self,
+        rate_per_sec: float = 1.0,
+        burst: int = 10,
+        timeout: float = 10.0,
+        max_retries: int = 5,
+        base_delay: float = 30.0,
+        max_delay: float = 1000.0
+    ):
         self._limiter = TokenBucket(rate_per_sec=rate_per_sec, capacity=burst)
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.base_delay = base_delay
+        self.max_delay = max_delay
         self.headers = {
             "User-Agent": "MTGAnalysisTokens/1.0",
             "Accept": "application/json;q=0.9,*/*;q=0.8"
         }
 
-    def get(
-        self,
-        url: str,
-        *,
-        timeout: float = 10.0,   # per-request timeout (seconds)
-        max_retries: int = 5,   # number of retries on transient failures
-        base_delay: float = 30.0,   # base backoff (seconds)
-        max_delay: float = 1000.0,   # max backoff (seconds)
-        **request_kwargs   # pass extra requests.get kwargs if needed
-    ) -> Optional[requests.Response]:
-        """
-        Resilient GET with client-side rate limiting, retries, and 
-        jittered backoff.
-        Honors Retry-After when present.
-        """
-
-        attempt = 0
-
-        while True:
-            # Rate-limit the attempt (counts even if it fails)
+    def get(self, url: str, **request_kwargs) -> Optional[requests.Response]:
+        """Resilient GET with rate limiting, retries, and exponential 
+        backoff."""
+        for attempt in range(self.max_retries + 1):
             self._limiter.acquire()
-
             try:
-                resp = requests.get(
-                    url,
-                    timeout=timeout,
-                    headers=self.headers,
-                    **request_kwargs)
-                resp.raise_for_status()
-
-                # Check for rate limit redirect pattern
+                resp = requests.get(url, timeout=self.timeout,
+                                    headers=self.headers, **request_kwargs)
                 if _is_rate_limit_redirect(resp):
-                    # Treat as retryable error (429-like)
-                    err = requests.exceptions.HTTPError(
-                        "Rate limit redirect (429)"
-                    )
-                    resp.status_code = 429
-                    err.response = resp
-                    raise err
-
+                    resp.status_code = 429  # Treat as rate limit error
+                    raise requests.HTTPError(
+                        "Rate limit redirect", response=resp)
+                resp.raise_for_status()
                 return resp
-
             except Exception as e:
-                # Non-retryable -> propagate
-                if not _is_retryable_request_error(e):
-                    logging.error(f"Non-retryable error for {url}\n{e}")
-                    raise
-
-                attempt += 1
-                if attempt > max_retries:
-                    logging.error(f"Exceeded max retries for {url}")
+                if (not _is_retryable_request_error(e)
+                    or attempt >= self.max_retries):
+                    logging.error(f"Failed to fetch {url}: {e}")
                     return None
 
-                # Prefer server-provided Retry-After when present
-                sleep_for = None
+                # Determine sleep duration
+                sleep_for = self.base_delay
                 if (isinstance(e, requests.HTTPError)
-                        and e.response is not None):
+                    and e.response is not None):
                     retry_after = _parse_retry_after_seconds(
-                        (e.response.headers.get("Retry-After")
-                         or e.response.headers.get("retry-after")))
+                        e.response.headers.get("Retry-After"))
                     if retry_after is not None:
-                        sleep_for = min(retry_after, max_delay)
-
-                # Otherwise use exponential backoff + jitter
-                if sleep_for is None:
+                        sleep_for = min(retry_after, self.max_delay)
+                    else:
+                        sleep_for = _compute_backoff_seconds(
+                            attempt + 1, self.base_delay, self.max_delay)
+                else:
                     sleep_for = _compute_backoff_seconds(
-                        attempt,
-                        base_delay=base_delay,
-                        max_delay=max_delay)
+                        attempt + 1, self.base_delay, self.max_delay)
 
                 time.sleep(sleep_for)
+        return None
 
 
 if __name__ == "__main__":
