@@ -97,36 +97,30 @@ class EDHRec:
         slim = {k: v for k, v in deck_preview.items() if k in keep}
         return slim
 
-    def _report_rate(self, num_decks: int, seconds: int, new_decks: int):
-        rate = num_decks / seconds if seconds > 0 else float('inf')
-        rate_str = f" ({round(rate)}/s)." if new_decks > 1 else "."
-        logging.info((f"Saved {new_decks} new deck(s) in "
-                      f"{format_time(int(seconds))}" + rate_str))
-
     def save_decks(self, commander: str):
         start_time = time.perf_counter()
         decks = self.get_decks(commander)
         logging.info(f"Saving {len(decks)} deck(s) for {commander}...")
 
-        Path(f"decks/{commander}").mkdir(parents=True, exist_ok=True)
+        deck_dir = Path(f"decks/{commander}")
+        deck_dir.mkdir(parents=True, exist_ok=True)
 
         new_decks = 0
         for deck in decks:
-            url_hash = deck["urlhash"]   # Deck ID
-            if Path(f"decks/{commander}/{url_hash}.json").is_file():
+            deck_file = deck_dir / f"{deck['urlhash']}.json"
+            if deck_file.is_file():
                 continue  # Skip if we already have this deck
-            new_decks += 1
-            deck_data = self.get_deck(url_hash)
-            if deck_data is not None:
-                with open(f"decks/{commander}/{url_hash}.json", "w") as f:
-                    json.dump(deck_data, f)
 
-        end_time = time.perf_counter()
-        seconds = end_time - start_time
-        decks_per_second = len(decks) / seconds
-        rate_str = f" ({round(decks_per_second)}/s)." if new_decks > 1 else "."
+            deck_data = self.get_deck(deck["urlhash"])
+            if deck_data:
+                deck_file.write_text(json.dumps(deck_data))
+                new_decks += 1
+
+        elapsed = time.perf_counter() - start_time
+        rate = new_decks / elapsed
+        rate_str = f" ({round(rate, 1)}/s)." if new_decks > 1 else "."
         logging.info((f"Saved {new_decks} new deck(s) in "
-                      f"{format_time(int(seconds))}" + rate_str))
+                      f"{format_time(int(elapsed))}{rate_str}"))
 
     def count_decks(self, commander: str) -> int:
         decks = self.get_decks(commander)
