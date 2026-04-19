@@ -91,8 +91,8 @@ class EDHRec:
             "urlhash",
             "deck"
         }
-        slim = {k: v for k, v in deck_preview.items() if k in keep}
-        return slim
+
+        return {k: v for k, v in deck_preview.items() if k in keep}
 
     def save_decks(self, commander: str):
         start_time = time.perf_counter()
@@ -120,10 +120,9 @@ class EDHRec:
                       f"{format_time(int(elapsed))}{rate_str}"))
 
     def count_decks(self, commander: str) -> int:
-        decks = self.get_decks(commander)
         # All decks for all commanders: 9,283,036.
         # Not including flavor names: 8,314,401
-        return len(decks)
+        return len(self.get_decks(commander))
 
 
 def format_commander_name(name: str) -> str:
