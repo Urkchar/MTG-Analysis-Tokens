@@ -80,7 +80,7 @@ class EDHRec:
     def get_deck(self, url_hash: str):
         url = self.build_next_js_url("deckpreview", url_hash)
         resp = self._get(url)
-        data = resp.json()["page_props"]["data"]
+        data = resp.json()["pageProps"]["data"]
         deck_preview = data["panels"]["deckinfo"]["deck_preview"]
         keep = {
             "cedh",
