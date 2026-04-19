@@ -1,3 +1,4 @@
 .venv/
 decks/
 __pycache__/
+tests/
