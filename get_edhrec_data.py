@@ -80,6 +80,7 @@ class EDHRec:
     def get_deck(self, url_hash: str):
         url = self.build_next_js_url("deckpreview", url_hash)
         resp = self._get(url)
+        # TODO: resp can be None
         data = resp.json()["pageProps"]["data"]
         deck_preview = data["panels"]["deckinfo"]["deck_preview"]
         keep = {
@@ -122,7 +123,10 @@ class EDHRec:
 
         end_time = time.perf_counter()
         seconds = end_time - start_time
-        self._report_rate(len(decks), seconds, new_decks)
+        decks_per_second = len(decks) / seconds
+        rate_str = f" ({round(decks_per_second)}/s)." if new_decks > 1 else "."
+        logging.info((f"Saved {new_decks} new deck(s) in "
+                      f"{format_time(int(seconds))}" + rate_str))
 
     def count_decks(self, commander: str) -> int:
         decks = self.get_decks(commander)
@@ -231,7 +235,7 @@ def main():
 
     client = EDHRec(rate_per_sec=2)
 
-    for commander in commanders[5030:]:
+    for commander in sorted(commanders):
         client.save_decks(commander)
 
 
