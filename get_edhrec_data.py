@@ -41,18 +41,19 @@ class EDHRec:
         """Fetch HTML and parse __NEXT_DATA__ to get buildId."""
         html = self._http_client.get(self.base_url).text
         soup = BeautifulSoup(html, "html.parser")
-        s = soup.find("script", id="__NEXT_DATA__")
-        if not s or not s.string:
+        script = soup.find("script", id="__NEXT_DATA__")
+        if not script or not script.string:
             raise RuntimeError("Could not locate __NEXT_DATA__ on the page.")
 
-        data = json.loads(s.string)
-        build_id = data.get("buildId")
+        try:
+            build_id = json.loads(script.string).get("buildId")
+        except json.JSONDecodeError:
+            build_id = None
 
         if not build_id:
             # Try regex fallback
-            match = re.search(r'"buildId"\s*:\s*"([^"]+)"', s.string)
-            if match:
-                build_id = match.group(1)
+            match = re.search(r'"buildId"\s*:\s*"([^"]+)"', script.string)
+            build_id = match.group(1) if match else None
 
         if not build_id:
             raise RuntimeError("Could not extract buildId from __NEXT_DATA__")
