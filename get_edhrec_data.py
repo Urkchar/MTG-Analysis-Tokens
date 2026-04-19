@@ -16,17 +16,14 @@ logging.basicConfig(level=logging.DEBUG, format="%(levelname)s: %(message)s")
 
 
 class EDHRec:
-    def __init__(
-        self,
-        *,
-        rate_per_sec: float = 1.0,
-    ):
+    def __init__(self, *, rate_per_sec: float = 1.0):
         self._http_client = HTTPClient(rate_per_sec=rate_per_sec)
         self.base_url = "https://edhrec.com/"
         self.base_next_js_url = f"{self.base_url}/_next/data/"
         self.build_id = self.get_build_id()
 
     def _get(self, url: str) -> Optional[requests.Response]:
+        # TODO: Remove?
         try:
             resp = self._http_client.get(url)
         except requests.exceptions.HTTPError as e:
@@ -65,9 +62,8 @@ class EDHRec:
 
     def build_next_js_url(self, route: str, identifier: str) -> str:
         """identifier is a formatted commander name or a URL hash"""
-        url = (f"{self.base_next_js_url}/{self.build_id}/{route}/{identifier}"
-               ".json")
-        return url
+        return (f"{self.base_next_js_url}{self.build_id}/{route}/"
+                f"{identifier}.json")
 
     def get_decks(self, commander: str):
         url = self.build_next_js_url("decks", commander)
