@@ -4,7 +4,7 @@ from token_bucket import HTTPClient
 
 
 class Scryfall:
-    def __init__(self, requests_per_second: float = 10.0):
+    def __init__(self, requests_per_second: float = 2.0):
         self.base_url = "https://api.scryfall.com"
         self._http_client = HTTPClient(rate_per_sec=requests_per_second)
 
