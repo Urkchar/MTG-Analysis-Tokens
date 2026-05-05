@@ -71,8 +71,11 @@ def _is_rate_limit_redirect(resp: requests.Response) -> bool:
         return False
 
 
-def _compute_backoff_seconds(attempt: int, base_delay: float, max_delay: float
-                             ) -> float:
+def _compute_backoff_seconds(
+    attempt: int,
+    base_delay: float,
+    max_delay: float
+    ) -> float:
     """Exponential backoff with full jitter."""
     backoff = min(max_delay, base_delay * (2 ** (attempt - 1)))
     return random.uniform(0, backoff)
@@ -158,8 +161,9 @@ class HTTPClient:
             except Exception as e:
                 if (not _is_retryable_request_error(e)
                     or attempt >= self.max_retries):
-                    logging.error(f"Failed to fetch {url}: {e}")
-                    return None
+                    # logging.error(f"Failed to fetch {url}: {e}")
+                    # logging.error(e)
+                    raise
 
                 # Determine sleep duration
                 sleep_for = self.base_delay
@@ -177,7 +181,6 @@ class HTTPClient:
                         attempt + 1, self.base_delay, self.max_delay)
 
                 time.sleep(sleep_for)
-        return None
 
 
 if __name__ == "__main__":
