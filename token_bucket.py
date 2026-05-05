@@ -8,6 +8,7 @@ import logging
 
 
 logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("charset_normalizer").setLevel(logging.WARNING)
 
 
 def _parse_retry_after_seconds(value: Optional[str]) -> Optional[float]:
