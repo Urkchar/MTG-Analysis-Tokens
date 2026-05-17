@@ -2,3 +2,4 @@
 decks/
 __pycache__/
 tests/
+.vscode/
