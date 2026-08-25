@@ -1,129 +1,14 @@
 from typing import Optional
 import requests
 import re
-from bs4 import BeautifulSoup
-import json
-from pathlib import Path
 import xml.etree.ElementTree as ET
 import logging
-import time
 
 from scryfall import Scryfall
-from token_bucket import HTTPClient
-from utils import format_time
+from EDHRec import EDHRec
 
 logging.basicConfig(level=logging.DEBUG, format="%(levelname)s: %(message)s")
 
-
-class EDHRec:
-    def __init__(self, *, rate_per_sec: float = 1.0):
-        self._http_client = HTTPClient(rate_per_sec=rate_per_sec)
-        self.base_url = "https://edhrec.com/"
-        self.base_next_js_url = f"{self.base_url}/_next/data/"
-        self.build_id = self.get_build_id()
-
-    def _get(self, url: str) -> Optional[requests.Response]:
-        # TODO: Remove?
-        try:
-            resp = self._http_client.get(url)
-        except requests.exceptions.HTTPError as e:
-            if e.response is not None and e.response.status_code == 404:
-                logging.warning(f"URL {url} not found (404).")
-                return None
-            raise
-
-        return resp
-
-    def get_build_id(self) -> str:
-        """Fetch HTML and parse __NEXT_DATA__ to get buildId."""
-        html = self._http_client.get(self.base_url).text
-        soup = BeautifulSoup(html, "html.parser")
-        script = soup.find("script", id="__NEXT_DATA__")
-        if not script or not script.string:
-            raise RuntimeError("Could not locate __NEXT_DATA__ on the page.")
-
-        try:
-            build_id = json.loads(script.string).get("buildId")
-        except json.JSONDecodeError:
-            build_id = None
-
-        if not build_id:
-            # Try regex fallback
-            match = re.search(r'"buildId"\s*:\s*"([^"]+)"', script.string)
-            build_id = match.group(1) if match else None
-
-        if not build_id:
-            raise RuntimeError("Could not extract buildId from __NEXT_DATA__")
-
-        return build_id
-
-    def set_build_id(self):
-        self.build_id = self.get_build_id()
-
-    def build_next_js_url(self, route: str, identifier: str) -> str:
-        """identifier is a formatted commander name or a URL hash"""
-        return (f"{self.base_next_js_url}{self.build_id}/{route}/"
-                f"{identifier}.json")
-
-    def get_decks(self, commander: str):
-        url = self.build_next_js_url("decks", commander)
-        resp = self._get(url)
-        page_props = resp.json()["pageProps"]
-
-        # TODO: resp can be None
-        data = page_props["data"]["table"]
-        return data
-
-    def get_deck(self, url_hash: str):
-        url = self.build_next_js_url("deckpreview", url_hash)
-        resp = self._get(url)
-        # TODO: resp can be None
-        data = resp.json()["pageProps"]["data"]
-        deck_preview = data["panels"]["deckinfo"]["deck_preview"]
-        keep = {
-            "cedh",
-            "coloridentity",
-            "commanders",
-            "edhrec_tags",
-            "savedate",
-            "tags",
-            "url",
-            "urlhash",
-            "deck"
-        }
-
-        return {k: v for k, v in deck_preview.items() if k in keep}
-
-    def save_decks(self, commander: str):
-        start_time = time.perf_counter()
-        decks = self.get_decks(commander)
-        logging.info(f"Saving {len(decks)} deck(s) for {commander}...")
-
-        deck_dir = Path(f"decks/{commander}")
-        deck_dir.mkdir(parents=True, exist_ok=True)
-
-        new_decks = 0
-        for deck in decks:
-            deck_file = deck_dir / f"{deck['urlhash']}.json"
-            if deck_file.is_file():
-                continue  # Skip if we already have this deck
-
-            deck_data = self.get_deck(deck["urlhash"])
-            if deck_data:
-                deck_file.write_text(json.dumps(deck_data))
-                new_decks += 1
-
-        elapsed = time.perf_counter() - start_time
-        rate = new_decks / elapsed
-        rate_str = f" ({round(rate, 1)}/s)." if new_decks > 1 else "."
-        logging.info((f"Saved {new_decks} new deck(s) in "
-                      f"{format_time(int(elapsed))}{rate_str}"))
-
-    def count_decks(self, commander: str) -> int:
-        # All decks for all commanders: 9,283,036.
-        # Not including flavor names: 8,314,401
-        return len(self.get_decks(commander))
-    
 
 def _extract_card_name(card: dict, name_key: str) -> Optional[str]:
     """Extract card name from card dict, handling both simple and card
@@ -216,9 +101,9 @@ def main():
     commanders = get_commanders()
     logging.info(f"Found {len(commanders)} unique commanders on EDHRec.")
 
-    client = EDHRec(rate_per_sec=2)
+    client = EDHRec(rate_per_sec=1)
 
-    for commander in sorted(commanders):
+    for commander in sorted(commanders)[:5]:
         client.save_decks(commander)
 
 
