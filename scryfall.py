@@ -1,3 +1,5 @@
+import gzip
+import json
 import requests
 
 from token_bucket import HTTPClient
@@ -71,7 +73,18 @@ class Scryfall:
 
         resp = self._http_client.get(self.base_url + f"/bulk-data/{type}")
         j = resp.json()
-        data = self._http_client.get(j["download_uri"]).json()
+        
+        # Download gzipped JSONL file
+        download_url = j["jsonl_download_uri"]
+        data_resp = self._http_client.get(download_url)
+        
+        # Decompress gzipped JSONL and parse line-by-line
+        decompressed = gzip.decompress(data_resp.content)
+        data = []
+        for line in decompressed.decode('utf-8').split('\n'):
+            if line.strip():  # Skip empty lines
+                data.append(json.loads(line))
+        
         return data
 
 
